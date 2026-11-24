@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
 
 let server;
 let baseUrl;
@@ -69,4 +71,42 @@ test("sends model failures to manual review within the timeout", async () => {
     });
     if (marker === "[timeout]") assert.ok(performance.now() - started < 900);
   }
+});
+
+test("clears the previous draft on manual review", async () => {
+  const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
+  const script = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(script, "Page script is present");
+
+  const fields = {
+    "#message": { value: "Доставка" },
+    "#notice": { textContent: "" },
+    "#topic": { textContent: "" },
+    "#draft": { textContent: "" },
+  };
+  const button = { disabled: false };
+  let submit;
+  const form = {
+    querySelector: () => button,
+    addEventListener: (name, handler) => {
+      assert.equal(name, "submit");
+      submit = handler;
+    },
+  };
+  let modelReply = { status: "ready", topic: "delivery", draft: "Прежний черновик" };
+  runInNewContext(script, {
+    document: { querySelector: (selector) => selector === "form" ? form : fields[selector] },
+    fetch: async () => ({ ok: true, json: async () => modelReply }),
+  });
+
+  const event = { preventDefault() {} };
+  await submit(event);
+  assert.match(fields["#draft"].textContent, /Прежний черновик/);
+
+  fields["#message"].value = "[error]";
+  modelReply = { status: "manual_review", topic: null, draft: null };
+  await submit(event);
+  assert.equal(fields["#topic"].textContent, "");
+  assert.equal(fields["#draft"].textContent, "");
+  assert.match(fields["#notice"].textContent, /Разберите заявку вручную/);
 });
